@@ -1,6 +1,5 @@
 import base64
 import io
-import json
 import os
 import re
 
@@ -51,42 +50,57 @@ def get_secret(name):
         return os.environ.get(name, "")
 
 
-CLOUDFLARE_ACCOUNT_ID = get_secret(
+ACCOUNT_ID = get_secret(
     "CLOUDFLARE_ACCOUNT_ID"
 )
 
-CLOUDFLARE_API_TOKEN = get_secret(
+API_TOKEN = get_secret(
     "CLOUDFLARE_API_TOKEN"
 )
 
 
-if not CLOUDFLARE_ACCOUNT_ID:
+if not ACCOUNT_ID:
     st.error(
-        "CLOUDFLARE_ACCOUNT_ID is missing from Streamlit Secrets."
+        "CLOUDFLARE_ACCOUNT_ID is missing."
     )
     st.stop()
 
 
-if not CLOUDFLARE_API_TOKEN:
+if not API_TOKEN:
     st.error(
-        "CLOUDFLARE_API_TOKEN is missing from Streamlit Secrets."
+        "CLOUDFLARE_API_TOKEN is missing."
     )
     st.stop()
 
 
 # =========================================================
-# CLOUDFLARE WORKERS AI
+# CLOUDFLARE MODELS
 # =========================================================
 
-CLOUDFLARE_MODEL = (
+VISION_MODEL = (
     "@cf/meta/llama-3.2-11b-vision-instruct"
 )
 
-CLOUDFLARE_URL = (
-    "https://api.cloudflare.com/client/v4/accounts/"
-    f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/"
-    f"{CLOUDFLARE_MODEL}"
+TEXT_MODEL = (
+    "@cf/meta/llama-3.1-8b-instruct-fast"
 )
+
+
+def cloudflare_url(model):
+
+    return (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{ACCOUNT_ID}/ai/run/"
+        f"{model}"
+    )
+
+
+HEADERS = {
+    "Authorization":
+        f"Bearer {API_TOKEN}",
+    "Content-Type":
+        "application/json"
+}
 
 
 # =========================================================
@@ -118,240 +132,156 @@ FADE_HEIGHT = px(180)
 
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
+
 BLUE = (0, 170, 255)
 
 
 # =========================================================
-# CHECK ASSETS
+# CHECK FILES
 # =========================================================
 
 if not os.path.exists(FONT_PATH):
+
     st.error(
-        "Font missing. Expected: fonts/Anton-Regular.ttf"
+        "Font missing: fonts/Anton-Regular.ttf"
     )
+
     st.stop()
 
 
 if not os.path.exists(LOGO_PATH):
+
     st.warning(
-        "Logo missing at assets/logo.png"
+        "Logo missing: assets/logo.png"
     )
 
 
 # =========================================================
-# PREPARE IMAGE FOR AI
+# CLOUDFLARE RESPONSE EXTRACTOR
 # =========================================================
 
-def prepare_ai_image(image_bytes):
+def extract_text(value):
+    """
+    Cloudflare can return:
+    string
+    dict with response
+    dict with text
+    nested result
+    list
 
-    image = Image.open(
-        io.BytesIO(image_bytes)
-    ).convert("RGB")
+    This function safely extracts readable text.
+    """
 
-    # AI does not need the full 2160x2880 source.
-    # This saves Cloudflare usage and upload size.
-    image.thumbnail(
-        (1280, 1280),
-        Image.Resampling.LANCZOS
-    )
+    if value is None:
 
-    buffer = io.BytesIO()
+        return ""
 
-    image.save(
-        buffer,
-        format="JPEG",
-        quality=88,
-        optimize=True
-    )
 
-    return buffer.getvalue()
+    if isinstance(
+        value,
+        str
+    ):
 
+        return value.strip()
 
-def image_to_data_url(image_bytes):
 
-    encoded = base64.b64encode(
-        image_bytes
-    ).decode("utf-8")
+    if isinstance(
+        value,
+        (int, float, bool)
+    ):
 
-    return (
-        "data:image/jpeg;base64,"
-        + encoded
-    )
+        return str(value)
 
 
-# =========================================================
-# AI PROMPT
-# =========================================================
+    if isinstance(
+        value,
+        list
+    ):
 
-def build_prompt(custom_headline=""):
+        parts = []
 
-    prompt = """
-You are a human social media editor running a highly engaging viral Instagram page.
+        for item in value:
 
-Study the supplied image carefully.
+            text = extract_text(
+                item
+            )
 
-Return VALID JSON ONLY.
+            if text:
 
-Do not use markdown.
-Do not use a code block.
-Do not write anything outside the JSON.
+                parts.append(
+                    text
+                )
 
-Use exactly this structure:
+        return "\n".join(
+            parts
+        ).strip()
 
-{
-  "headline": "maximum 8 words",
-  "suggested_highlight": ["word1", "word2"],
-  "paragraph_1": "4 to 6 natural sentences",
-  "paragraph_2": "4 to 6 natural sentences",
-  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"]
-}
 
-HEADLINE:
+    if isinstance(
+        value,
+        dict
+    ):
 
-Maximum 8 words.
+        # Prefer known Cloudflare output keys
 
-Make it bold, interesting, attention grabbing, dramatic, and appropriate for a viral Instagram page.
+        for key in (
+            "response",
+            "text",
+            "content",
+            "output",
+            "result"
+        ):
 
-Do not invent specific facts that cannot reasonably be determined from the image.
+            if key in value:
 
-SUGGESTED HIGHLIGHT:
+                text = extract_text(
+                    value[key]
+                )
 
-Choose one or two important words that already exist exactly inside the headline.
+                if text:
 
-CAPTION:
+                    return text
 
-Write exactly two paragraphs.
 
-Each paragraph should contain approximately 4 to 6 natural sentences.
+        # Last resort: recursively inspect values
 
-The caption should deliberately over explain the situation.
+        parts = []
 
-Make the writing expressive, entertaining, energetic, dramatic, engaging, conversational, and attention grabbing.
+        for item in value.values():
 
-Write like a real human running a viral Instagram media page.
+            text = extract_text(
+                item
+            )
 
-Talk about the mood, reaction, visual details, atmosphere, situation, and why the subject feels interesting.
+            if text:
 
-You may exaggerate emotion, humor, surprise, shock, tension, drama, intensity, or scale when appropriate.
+                parts.append(
+                    text
+                )
 
-Do not make it sound academic.
 
-Do not make it sound like a technical report.
+        return "\n".join(
+            parts
+        ).strip()
 
-Avoid robotic AI sounding phrases.
 
-Do not start with phrases such as "This image shows".
-
-Do not say "It is important to note".
-
-VERY IMPORTANT CAPTION RULES:
-
-Never use hyphens.
-
-Never use the character "-".
-
-Never use em dashes.
-
-Never use en dashes.
-
-Never use bullet points.
-
-Never use dash separated phrases.
-
-Use natural commas, periods, exclamation marks, and question marks.
-
-Do not invent statistics.
-
-Do not invent dates.
-
-Do not invent names.
-
-Do not invent locations.
-
-Do not invent world records.
-
-Do not invent factual details that cannot reasonably be determined from the image.
-
-HASHTAGS:
-
-Return exactly 5 relevant hashtags.
-
-Every hashtag must begin with #.
-
-Do not use hyphens inside hashtags.
-
-Do not return more than 5 hashtags.
-"""
-
-    if custom_headline.strip():
-
-        prompt += f"""
-
-The user provided this exact headline:
-
-{custom_headline.strip()}
-
-Use that headline EXACTLY.
-
-Do not rewrite it.
-
-The suggested_highlight words must exist inside that exact headline.
-"""
-
-    return prompt
+    return str(
+        value
+    ).strip()
 
 
 # =========================================================
-# CLOUDFLARE REQUEST
+# GENERIC CLOUDFLARE REQUEST
 # =========================================================
 
-def ask_cloudflare(
-    original_image_bytes,
-    custom_headline=""
+def run_cloudflare(
+    model,
+    payload
 ):
 
-    ai_image = prepare_ai_image(
-        original_image_bytes
-    )
-
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are an experienced human "
-                    "Instagram social media editor."
-                )
-            },
-            {
-                "role": "user",
-                "content": build_prompt(
-                    custom_headline
-                )
-            }
-        ],
-
-        "image": image_to_data_url(
-            ai_image
-        ),
-
-        "max_tokens": 1200,
-
-        "temperature": 0.7
-    }
-
-
-    headers = {
-        "Authorization": (
-            f"Bearer {CLOUDFLARE_API_TOKEN}"
-        ),
-        "Content-Type": "application/json"
-    }
-
-
     response = requests.post(
-        CLOUDFLARE_URL,
-        headers=headers,
+        cloudflare_url(model),
+        headers=HEADERS,
         json=payload,
         timeout=180
     )
@@ -360,7 +290,7 @@ def ask_cloudflare(
     if not response.ok:
 
         raise RuntimeError(
-            "Cloudflare Workers AI error:\n\n"
+            "Cloudflare HTTP error:\n\n"
             + response.text
         )
 
@@ -374,491 +304,489 @@ def ask_cloudflare(
     ):
 
         raise RuntimeError(
-            "Cloudflare request failed:\n\n"
-            + json.dumps(
-                data,
-                indent=2,
-                ensure_ascii=False
-            )
+            "Cloudflare AI request failed:\n\n"
+            + str(data)
         )
 
 
     result = data.get(
-        "result",
-        {}
+        "result"
     )
 
 
-    # =====================================================
-    # IMPORTANT FIX
-    #
-    # Cloudflare may return:
-    #
-    # response = "text"
-    #
-    # OR:
-    #
-    # response = {...JSON object...}
-    #
-    # Both are accepted.
-    # =====================================================
-
-    if isinstance(result, dict):
-
-        if "response" in result:
-
-            output = result[
-                "response"
-            ]
-
-        elif "output" in result:
-
-            output = result[
-                "output"
-            ]
-
-        elif "text" in result:
-
-            output = result[
-                "text"
-            ]
-
-        else:
-
-            output = result
-
-    else:
-
-        output = result
+    text = extract_text(
+        result
+    )
 
 
-    if output is None:
+    if not text:
 
         raise RuntimeError(
-            "Cloudflare returned an empty response."
+            "Cloudflare returned an empty AI response."
         )
 
 
-    return output
+    return text
 
 
 # =========================================================
-# RESPONSE HELPERS
+# PREPARE SMALL IMAGE FOR VISION AI
 # =========================================================
 
-def value_to_text(value):
+def prepare_ai_image(
+    original_bytes
+):
 
-    if value is None:
-        return ""
-
-    if isinstance(
-        value,
-        str
-    ):
-        return value.strip()
-
-    if isinstance(
-        value,
-        (int, float, bool)
-    ):
-        return str(value)
-
-    if isinstance(
-        value,
-        list
-    ):
-
-        return " ".join(
-            value_to_text(item)
-            for item in value
-        ).strip()
-
-    if isinstance(
-        value,
-        dict
-    ):
-
-        # Try common text fields first.
-
-        for key in (
-            "text",
-            "response",
-            "content",
-            "value"
-        ):
-
-            if key in value:
-
-                return value_to_text(
-                    value[key]
-                )
-
-        return json.dumps(
-            value,
-            ensure_ascii=False
+    image = Image.open(
+        io.BytesIO(
+            original_bytes
         )
-
-    return str(value)
-
-
-def strip_code_fence(text):
-
-    # FIX:
-    # Never call .strip() directly
-    # unless we know it is a string.
-
-    if isinstance(
-        text,
-        (dict, list)
-    ):
-
-        text = json.dumps(
-            text,
-            ensure_ascii=False
-        )
-
-    if text is None:
-        return ""
-
-    text = str(text).strip()
-
-
-    text = re.sub(
-        r"^```(?:json)?\s*",
-        "",
-        text,
-        flags=re.IGNORECASE
+    ).convert(
+        "RGB"
     )
 
 
-    text = re.sub(
-        r"\s*```$",
-        "",
-        text
+    image.thumbnail(
+        (
+            1280,
+            1280
+        ),
+        Image.Resampling.LANCZOS
     )
 
 
-    return text.strip()
+    buffer = io.BytesIO()
+
+
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=88,
+        optimize=True
+    )
+
+
+    return buffer.getvalue()
+
+
+def image_data_url(
+    image_bytes
+):
+
+    encoded = base64.b64encode(
+        image_bytes
+    ).decode(
+        "utf-8"
+    )
+
+
+    return (
+        "data:image/jpeg;base64,"
+        + encoded
+    )
 
 
 # =========================================================
-# NORMALIZE STRUCTURED RESPONSE
+# AI STAGE 1
+#
+# IMAGE → DETAILED DESCRIPTION
 # =========================================================
 
-def find_content_dict(value):
+def analyze_image(
+    original_bytes
+):
 
-    target_keys = {
-        "headline",
-        "paragraph_1",
-        "paragraph_2",
-        "hashtags"
+    ai_image = prepare_ai_image(
+        original_bytes
+    )
+
+
+    prompt = """
+Look carefully at the supplied image.
+
+Your ONLY job is to describe what is actually visible.
+
+Write one detailed natural language description.
+
+Mention:
+
+the main subject
+what the subject is doing
+the environment or setting
+important visible objects
+facial expression or reaction if relevant
+the mood of the scene
+anything unusual, funny, dramatic, surprising, or visually interesting
+
+Be specific enough that another writer who cannot see the image could understand what is happening.
+
+Do not write an Instagram headline.
+
+Do not write hashtags.
+
+Do not write an Instagram caption.
+
+Do not use bullet points.
+
+Do not invent names.
+
+Do not invent locations.
+
+Do not invent dates.
+
+Do not invent statistics.
+
+Do not claim facts that cannot reasonably be determined from the image.
+
+Only describe the image.
+"""
+
+
+    payload = {
+
+        "messages": [
+            {
+                "role":
+                    "system",
+
+                "content":
+                    (
+                        "You are a precise visual "
+                        "image analyst."
+                    )
+            },
+            {
+                "role":
+                    "user",
+
+                "content":
+                    prompt
+            }
+        ],
+
+        "image":
+            image_data_url(
+                ai_image
+            ),
+
+        "max_tokens":
+            500,
+
+        "temperature":
+            0.2
     }
 
 
-    if isinstance(
-        value,
-        dict
+    return run_cloudflare(
+        VISION_MODEL,
+        payload
+    )
+
+
+# =========================================================
+# AI STAGE 2
+#
+# DESCRIPTION → INSTAGRAM COPY
+# =========================================================
+
+def generate_instagram_copy(
+    image_description,
+    custom_headline=""
+):
+
+    prompt = f"""
+You are a human social media editor running a viral Instagram media page.
+
+Another AI carefully inspected an image and produced this visual description:
+
+IMAGE DESCRIPTION:
+{image_description}
+
+Using ONLY that description as the factual basis, create Instagram carousel copy.
+
+Return EXACTLY this format:
+
+HEADLINE: your headline
+HIGHLIGHT: one or two exact words from the headline
+PARAGRAPH_1: first paragraph
+PARAGRAPH_2: second paragraph
+HASHTAGS: #tag1 #tag2 #tag3 #tag4 #tag5
+
+HEADLINE RULES:
+
+Maximum 8 words.
+
+Make it bold, dramatic, engaging, viral, and attention grabbing.
+
+The headline should strongly relate to what is actually happening in the image.
+
+Do not use "Untitled Story".
+
+HIGHLIGHT RULES:
+
+Choose one or two important words.
+
+The words must exist exactly inside the headline.
+
+CAPTION RULES:
+
+Write exactly TWO paragraphs.
+
+Each paragraph should contain around 4 to 6 natural sentences.
+
+The paragraphs should be deliberately over explanatory.
+
+Explain what is happening.
+
+Expand on the visual reaction, atmosphere, mood, funny detail, surprising detail, tension, or drama.
+
+Write like a real human who runs an entertaining Instagram media page.
+
+Make it expressive, conversational, engaging, and slightly exaggerated.
+
+Do not sound academic.
+
+Do not sound robotic.
+
+Do not say "This image shows".
+
+Do not say "It is important to note".
+
+VERY IMPORTANT:
+
+Never use hyphens.
+
+Never use the character "-".
+
+Never use em dashes.
+
+Never use en dashes.
+
+Never use bullet points.
+
+Never write dash separated phrases.
+
+Use commas, periods, exclamation marks, and question marks naturally.
+
+Do not invent names.
+
+Do not invent dates.
+
+Do not invent locations.
+
+Do not invent statistics.
+
+Do not invent world records.
+
+Do not invent factual information beyond the supplied visual description.
+
+HASHTAG RULES:
+
+Exactly 5 hashtags.
+
+Each hashtag begins with #.
+
+All hashtags must relate to the actual subject.
+
+Do not use generic unrelated hashtags unless necessary.
+
+Do not use hyphens inside hashtags.
+"""
+
+
+    if custom_headline.strip():
+
+        prompt += f"""
+
+IMPORTANT:
+
+The user has already provided this exact headline:
+
+{custom_headline.strip()}
+
+Use it EXACTLY as HEADLINE.
+
+Do not change a single word.
+
+HIGHLIGHT must be one or two words that already exist inside that exact headline.
+"""
+
+
+    payload = {
+
+        "messages": [
+            {
+                "role":
+                    "system",
+
+                "content":
+                    (
+                        "You are an experienced "
+                        "human Instagram content writer."
+                    )
+            },
+            {
+                "role":
+                    "user",
+
+                "content":
+                    prompt
+            }
+        ],
+
+        "max_tokens":
+            1200,
+
+        "temperature":
+            0.7
+    }
+
+
+    return run_cloudflare(
+        TEXT_MODEL,
+        payload
+    )
+
+
+# =========================================================
+# PARSE STAGE 2 OUTPUT
+# =========================================================
+
+def parse_copy(
+    text
+):
+
+    fields = {
+        "headline": "",
+        "highlight": "",
+        "paragraph_1": "",
+        "paragraph_2": "",
+        "hashtags": ""
+    }
+
+
+    current_field = None
+
+
+    label_map = {
+        "HEADLINE:":
+            "headline",
+
+        "HIGHLIGHT:":
+            "highlight",
+
+        "PARAGRAPH_1:":
+            "paragraph_1",
+
+        "PARAGRAPH_2:":
+            "paragraph_2",
+
+        "HASHTAGS:":
+            "hashtags"
+    }
+
+
+    for raw_line in (
+        text.splitlines()
     ):
+
+        line = raw_line.strip()
+
+
+        if not line:
+
+            continue
+
+
+        matched = False
+
+
+        for label, key in (
+            label_map.items()
+        ):
+
+            if line.upper().startswith(
+                label
+            ):
+
+                fields[
+                    key
+                ] = line[
+                    len(label):
+                ].strip()
+
+                current_field = key
+
+                matched = True
+
+                break
+
 
         if (
-            "headline" in value
-            or
-            len(
-                target_keys.intersection(
-                    value.keys()
-                )
-            ) >= 2
+            not matched
+            and current_field
         ):
 
-            return value
-
-
-        for key in (
-            "response",
-            "output",
-            "text",
-            "content",
-            "result"
-        ):
-
-            if key in value:
-
-                found = find_content_dict(
-                    value[key]
-                )
-
-                if found is not None:
-                    return found
-
-
-        for child in value.values():
-
-            found = find_content_dict(
-                child
+            fields[
+                current_field
+            ] += (
+                " "
+                + line
             )
 
-            if found is not None:
-                return found
+
+    headline = fields[
+        "headline"
+    ].strip()
 
 
-    elif isinstance(
-        value,
-        list
-    ):
-
-        for item in value:
-
-            found = find_content_dict(
-                item
-            )
-
-            if found is not None:
-                return found
+    highlight = fields[
+        "highlight"
+    ].strip()
 
 
-    return None
+    paragraph_1 = fields[
+        "paragraph_1"
+    ].strip()
 
 
-# =========================================================
-# AI RESPONSE PARSER
-# =========================================================
-
-def parse_ai_response(raw_response):
-
-    # -----------------------------------------------------
-    # CASE 1:
-    # Cloudflare already returned parsed JSON/dict.
-    # -----------------------------------------------------
-
-    content_dict = find_content_dict(
-        raw_response
-    )
+    paragraph_2 = fields[
+        "paragraph_2"
+    ].strip()
 
 
-    if content_dict is not None:
+    hashtags = fields[
+        "hashtags"
+    ].strip()
 
-        headline = value_to_text(
-            content_dict.get(
-                "headline",
-                ""
-            )
+
+    # IMPORTANT:
+    # No more silent UNTITLED STORY fallback.
+
+    if not headline:
+
+        raise ValueError(
+            "AI did not return a headline."
         )
 
 
-        highlights = content_dict.get(
-            "suggested_highlight",
-            []
+    if not paragraph_1:
+
+        raise ValueError(
+            "AI did not return paragraph 1."
         )
 
 
-        if isinstance(
-            highlights,
-            str
-        ):
+    if not paragraph_2:
 
-            highlights = [
-                highlights
-            ]
-
-        elif isinstance(
-            highlights,
-            dict
-        ):
-
-            highlights = list(
-                highlights.values()
-            )
-
-        elif not isinstance(
-            highlights,
-            list
-        ):
-
-            highlights = [
-                str(highlights)
-            ]
-
-
-        highlights = [
-            value_to_text(item)
-            for item in highlights
-            if value_to_text(item)
-        ]
-
-
-        paragraph_1 = value_to_text(
-            content_dict.get(
-                "paragraph_1",
-                ""
-            )
+        raise ValueError(
+            "AI did not return paragraph 2."
         )
-
-
-        paragraph_2 = value_to_text(
-            content_dict.get(
-                "paragraph_2",
-                ""
-            )
-        )
-
-
-        hashtags = content_dict.get(
-            "hashtags",
-            []
-        )
-
-
-        if isinstance(
-            hashtags,
-            str
-        ):
-
-            hashtags = hashtags.split()
-
-        elif isinstance(
-            hashtags,
-            dict
-        ):
-
-            hashtags = list(
-                hashtags.values()
-            )
-
-        elif not isinstance(
-            hashtags,
-            list
-        ):
-
-            hashtags = [
-                str(hashtags)
-            ]
-
-
-        return (
-            headline,
-            highlights,
-            paragraph_1,
-            paragraph_2,
-            hashtags
-        )
-
-
-    # -----------------------------------------------------
-    # CASE 2:
-    # Response is text containing JSON.
-    # -----------------------------------------------------
-
-    cleaned = strip_code_fence(
-        raw_response
-    )
-
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-
-
-    if (
-        start != -1
-        and end != -1
-        and end > start
-    ):
-
-        json_text = cleaned[
-            start:
-            end + 1
-        ]
-
-
-        try:
-
-            parsed = json.loads(
-                json_text
-            )
-
-
-            return parse_ai_response(
-                parsed
-            )
-
-        except Exception:
-
-            pass
-
-
-    # -----------------------------------------------------
-    # CASE 3:
-    # Fallback old style text parser.
-    # -----------------------------------------------------
-
-    headline = ""
-    highlights = []
-    paragraph_1 = ""
-    paragraph_2 = ""
-    hashtags = []
-
-
-    for line in cleaned.splitlines():
-
-        stripped = line.strip()
-
-        upper = stripped.upper()
-
-
-        if upper.startswith(
-            "HEADLINE:"
-        ):
-
-            headline = stripped.split(
-                ":",
-                1
-            )[1].strip()
-
-
-        elif upper.startswith(
-            "SUGGESTED_HIGHLIGHT:"
-        ):
-
-            value = stripped.split(
-                ":",
-                1
-            )[1].strip()
-
-            highlights = value.split()
-
-
-        elif upper.startswith(
-            "PARAGRAPH_1:"
-        ):
-
-            paragraph_1 = stripped.split(
-                ":",
-                1
-            )[1].strip()
-
-
-        elif upper.startswith(
-            "PARAGRAPH_2:"
-        ):
-
-            paragraph_2 = stripped.split(
-                ":",
-                1
-            )[1].strip()
-
-
-        elif upper.startswith(
-            "HASHTAGS:"
-        ):
-
-            hashtags = stripped.split(
-                ":",
-                1
-            )[1].strip().split()
 
 
     return (
         headline,
-        highlights,
+        highlight,
         paragraph_1,
         paragraph_2,
         hashtags
@@ -866,43 +794,28 @@ def parse_ai_response(raw_response):
 
 
 # =========================================================
-# CAPTION CLEANUP
+# CLEAN CAPTION
 # =========================================================
 
-def clean_paragraph(text):
+def remove_dashes(
+    text
+):
 
-    text = value_to_text(
+    text = (
         text
-    )
-
-
-    text = text.replace(
-        "—",
-        ", "
-    )
-
-    text = text.replace(
-        "–",
-        ", "
-    )
-
-    text = text.replace(
-        "-",
-        " "
-    )
-
-
-    for bullet in (
-        "•",
-        "●",
-        "▪",
-        "◦"
-    ):
-
-        text = text.replace(
-            bullet,
-            ""
+        .replace(
+            "—",
+            ", "
         )
+        .replace(
+            "–",
+            ", "
+        )
+        .replace(
+            "-",
+            " "
+        )
+    )
 
 
     text = re.sub(
@@ -915,152 +828,117 @@ def clean_paragraph(text):
     return text.strip()
 
 
-def clean_hashtag(tag):
-
-    tag = value_to_text(
-        tag
-    )
-
-
-    tag = (
-        tag
-        .replace("-", "")
-        .replace("—", "")
-        .replace("–", "")
-    )
-
-
-    tag = re.sub(
-        r"[^A-Za-z0-9_#]",
-        "",
-        tag
-    )
-
-
-    if not tag:
-        return ""
-
-
-    if not tag.startswith("#"):
-
-        tag = (
-            "#"
-            + tag
-        )
-
-
-    return tag
-
-
-def ensure_five_hashtags(
-    hashtags,
-    headline
+def extract_hashtags(
+    text
 ):
 
-    final_tags = []
-
-
-    if isinstance(
-        hashtags,
-        str
-    ):
-
-        hashtags = hashtags.split()
-
-
-    if not isinstance(
-        hashtags,
-        list
-    ):
-
-        hashtags = [
-            hashtags
-        ]
-
-
-    for tag in hashtags:
-
-        cleaned = clean_hashtag(
-            tag
-        )
-
-
-        if (
-            cleaned
-            and cleaned not in final_tags
-        ):
-
-            final_tags.append(
-                cleaned
-            )
-
-
-        if len(
-            final_tags
-        ) == 5:
-
-            break
-
-
-    # -----------------------------------------------------
-    # If AI produced fewer than 5,
-    # create relevant tags from headline.
-    # -----------------------------------------------------
-
-    stop_words = {
-        "THE",
-        "A",
-        "AN",
-        "AND",
-        "OR",
-        "OF",
-        "IN",
-        "ON",
-        "AT",
-        "TO",
-        "IS",
-        "ARE",
-        "THIS",
-        "THAT",
-        "WITH",
-        "FOR",
-        "WILL"
-    }
-
-
-    headline_words = re.findall(
-        r"[A-Za-z0-9]+",
-        headline.upper()
+    tags = re.findall(
+        r"#[A-Za-z0-9_]+",
+        text
     )
 
 
-    for word in headline_words:
-
-        if word in stop_words:
-            continue
+    unique = []
 
 
-        tag = (
-            "#"
-            + word.title()
-        )
+    for tag in tags:
 
+        if tag not in unique:
 
-        if tag not in final_tags:
-
-            final_tags.append(
+            unique.append(
                 tag
             )
 
 
         if len(
-            final_tags
+            unique
         ) == 5:
 
             break
 
 
-    fallback_tags = [
+    return unique
+
+
+def build_caption(
+    p1,
+    p2,
+    hashtags,
+    headline
+):
+
+    p1 = remove_dashes(
+        p1
+    )
+
+    p2 = remove_dashes(
+        p2
+    )
+
+
+    tags = extract_hashtags(
+        hashtags
+    )
+
+
+    # Only fill missing hashtags.
+    # Never replace actual paragraphs.
+
+    if len(tags) < 5:
+
+        words = re.findall(
+            r"[A-Za-z0-9]+",
+            headline
+        )
+
+
+        stop_words = {
+            "the",
+            "a",
+            "an",
+            "and",
+            "or",
+            "of",
+            "to",
+            "with",
+            "this",
+            "that",
+            "is",
+            "are"
+        }
+
+
+        for word in words:
+
+            if (
+                word.lower()
+                in stop_words
+            ):
+
+                continue
+
+
+            tag = (
+                "#"
+                + word.title()
+            )
+
+
+            if tag not in tags:
+
+                tags.append(
+                    tag
+                )
+
+
+            if len(
+                tags
+            ) == 5:
+
+                break
+
+
+    fallback = [
         "#Viral",
         "#Trending",
         "#Explore",
@@ -1069,80 +947,43 @@ def ensure_five_hashtags(
     ]
 
 
-    for tag in fallback_tags:
-
-        if tag not in final_tags:
-
-            final_tags.append(
-                tag
-            )
-
+    for tag in fallback:
 
         if len(
-            final_tags
-        ) == 5:
+            tags
+        ) >= 5:
 
             break
 
 
-    return final_tags[:5]
+        if tag not in tags:
+
+            tags.append(
+                tag
+            )
 
 
-def build_final_caption(
-    paragraph_1,
-    paragraph_2,
-    hashtags,
-    headline
-):
-
-    p1 = clean_paragraph(
-        paragraph_1
-    )
-
-    p2 = clean_paragraph(
-        paragraph_2
-    )
-
-
-    tags = ensure_five_hashtags(
-        hashtags,
-        headline
-    )
-
-
-    parts = []
-
-
-    if p1:
-        parts.append(
-            p1
+    return (
+        p1
+        + "\n\n"
+        + p2
+        + "\n\n"
+        + " ".join(
+            tags[:5]
         )
-
-
-    if p2:
-        parts.append(
-            p2
-        )
-
-
-    parts.append(
-        " ".join(tags)
     )
-
-
-    return "\n\n".join(
-        parts
-    ).strip()
 
 
 # =========================================================
 # HEADLINE HELPERS
 # =========================================================
 
-def clean_word(word):
+def clean_word(
+    word
+):
 
     return (
-        value_to_text(word)
+        str(word)
         .replace(",", "")
         .replace(".", "")
         .replace("!", "")
@@ -1155,7 +996,7 @@ def clean_word(word):
     )
 
 
-def get_headline_word_options(
+def headline_words(
     headline
 ):
 
@@ -1163,7 +1004,9 @@ def get_headline_word_options(
     seen = set()
 
 
-    for word in headline.split():
+    for word in (
+        headline.split()
+    ):
 
         cleaned = clean_word(
             word
@@ -1188,7 +1031,7 @@ def get_headline_word_options(
 
 
 # =========================================================
-# TEXT MEASUREMENT
+# TEXT DRAWING HELPERS
 # =========================================================
 
 def text_width(
@@ -1197,15 +1040,16 @@ def text_width(
     font
 ):
 
-    bbox = draw.textbbox(
+    box = draw.textbbox(
         (0, 0),
         text,
         font=font
     )
 
+
     return (
-        bbox[2]
-        - bbox[0]
+        box[2]
+        - box[0]
     )
 
 
@@ -1229,9 +1073,11 @@ def wrap_headline(
 
     for word in words:
 
-        candidate = " ".join(
-            current
-            + [word]
+        candidate = (
+            " ".join(
+                current
+                + [word]
+            )
         )
 
 
@@ -1270,11 +1116,7 @@ def wrap_headline(
     return lines
 
 
-# =========================================================
-# DRAW HEADLINE
-# =========================================================
-
-def draw_highlighted_line(
+def draw_colored_line(
     draw,
     words,
     highlight_words,
@@ -1283,7 +1125,7 @@ def draw_highlighted_line(
     y
 ):
 
-    space_width = text_width(
+    space = text_width(
         draw,
         " ",
         font
@@ -1302,9 +1144,9 @@ def draw_highlighted_line(
     ]
 
 
-    total_width = (
+    total = (
         sum(widths)
-        + space_width
+        + space
         * (
             len(words)
             - 1
@@ -1314,7 +1156,7 @@ def draw_highlighted_line(
 
     x = int(
         center_x
-        - total_width / 2
+        - total / 2
     )
 
 
@@ -1322,7 +1164,8 @@ def draw_highlighted_line(
 
         clean_word(word)
 
-        for word in highlight_words
+        for word
+        in highlight_words
     }
 
 
@@ -1353,35 +1196,26 @@ def draw_highlighted_line(
 
         x += (
             width
-            + space_width
+            + space
         )
 
 
 # =========================================================
-# HIGH QUALITY IMAGE FIT
+# IMAGE RESIZE
 # =========================================================
 
 def high_quality_fit(
     source,
-    size,
-    centering=(0.5, 0.5)
+    size
 ):
 
     return ImageOps.fit(
-        source.convert("RGB"),
+        source.convert(
+            "RGB"
+        ),
         size,
-        method=Image.Resampling.LANCZOS,
-        centering=centering
-    )
-
-
-def make_full_slide(source):
-
-    return high_quality_fit(
-        source,
-        (
-            WIDTH,
-            HEIGHT
+        method=(
+            Image.Resampling.LANCZOS
         )
     )
 
@@ -1390,7 +1224,9 @@ def make_full_slide(source):
 # BLACK FADE
 # =========================================================
 
-def add_black_fade(canvas):
+def add_black_fade(
+    canvas
+):
 
     fade_start = (
         PHOTO_HEIGHT
@@ -1414,9 +1250,12 @@ def add_black_fade(canvas):
         FADE_HEIGHT
     ):
 
-        t = y / max(
-            FADE_HEIGHT - 1,
-            1
+        t = (
+            y
+            / max(
+                FADE_HEIGHT - 1,
+                1
+            )
         )
 
 
@@ -1448,7 +1287,7 @@ def add_black_fade(canvas):
     )
 
 
-    black_strip = Image.new(
+    black = Image.new(
         "RGB",
         (
             WIDTH,
@@ -1459,7 +1298,7 @@ def add_black_fade(canvas):
 
 
     canvas.paste(
-        black_strip,
+        black,
         (
             0,
             fade_start
@@ -1469,7 +1308,7 @@ def add_black_fade(canvas):
 
 
 # =========================================================
-# COVER GENERATOR
+# COVER
 # =========================================================
 
 def create_cover(
@@ -1487,8 +1326,6 @@ def create_cover(
         BLACK
     )
 
-
-    # PHOTO
 
     photo = high_quality_fit(
         source,
@@ -1508,8 +1345,6 @@ def create_cover(
     )
 
 
-    # FADE
-
     add_black_fade(
         canvas
     )
@@ -1519,8 +1354,6 @@ def create_cover(
         canvas
     )
 
-
-    # LOWER BLACK PANEL
 
     draw.rectangle(
         [
@@ -1590,8 +1423,7 @@ def create_cover(
         [
             px(50),
             divider_y,
-            WIDTH
-            - px(50),
+            WIDTH - px(50),
             divider_y
         ],
         fill=WHITE,
@@ -1610,7 +1442,7 @@ def create_cover(
     )
 
 
-    max_text_width = (
+    max_width = (
         WIDTH
         - px(40)
     )
@@ -1620,7 +1452,7 @@ def create_cover(
         draw,
         headline,
         font,
-        max_text_width
+        max_width
     )
 
 
@@ -1632,9 +1464,11 @@ def create_cover(
         font_size -= px(3)
 
 
-        font = ImageFont.truetype(
-            FONT_PATH,
-            font_size
+        font = (
+            ImageFont.truetype(
+                FONT_PATH,
+                font_size
+            )
         )
 
 
@@ -1642,7 +1476,7 @@ def create_cover(
             draw,
             headline,
             font,
-            max_text_width
+            max_width
         )
 
 
@@ -1652,7 +1486,7 @@ def create_cover(
     )
 
 
-    total_text_height = (
+    total_height = (
         len(lines)
         * line_height
     )
@@ -1672,29 +1506,29 @@ def create_cover(
 
     if (
         headline_y
-        + total_text_height
+        + total_height
         > bottom
     ):
 
         headline_y = (
             bottom
-            - total_text_height
+            - total_height
         )
 
 
-    for line_number, words in enumerate(
+    for index, words in enumerate(
         lines
     ):
 
-        draw_highlighted_line(
-            draw=draw,
-            words=words,
-            highlight_words=highlight_words,
-            font=font,
-            center_x=WIDTH // 2,
-            y=(
+        draw_colored_line(
+            draw,
+            words,
+            highlight_words,
+            font,
+            WIDTH // 2,
+            (
                 headline_y
-                + line_number
+                + index
                 * line_height
             )
         )
@@ -1704,10 +1538,29 @@ def create_cover(
 
 
 # =========================================================
-# PNG EXPORT
+# FULL IMAGE SLIDE
 # =========================================================
 
-def image_to_png_bytes(image):
+def make_full_slide(
+    image
+):
+
+    return high_quality_fit(
+        image,
+        (
+            WIDTH,
+            HEIGHT
+        )
+    )
+
+
+# =========================================================
+# PNG
+# =========================================================
+
+def to_png(
+    image
+):
 
     buffer = io.BytesIO()
 
@@ -1723,7 +1576,7 @@ def image_to_png_bytes(image):
 
 
 # =========================================================
-# APP HEADER
+# APP
 # =========================================================
 
 st.title(
@@ -1736,22 +1589,28 @@ st.caption(
 
 
 # =========================================================
-# SESSION STATE
+# SESSION
 # =========================================================
 
 defaults = {
-    "ai_ready": False,
+    "ready": False,
     "headline": "",
-    "suggested_highlight": [],
+    "suggested": [],
     "caption": "",
-    "ai_response": "",
-    "rendered_slides": []
+    "vision_description": "",
+    "vision_raw": "",
+    "writer_raw": "",
+    "slides": []
 }
 
 
-for key, value in defaults.items():
+for key, value in (
+    defaults.items()
+):
 
-    if key not in st.session_state:
+    if key not in (
+        st.session_state
+    ):
 
         st.session_state[
             key
@@ -1762,7 +1621,7 @@ for key, value in defaults.items():
 # UPLOAD
 # =========================================================
 
-uploaded_files = st.file_uploader(
+uploaded = st.file_uploader(
     "Upload carousel images",
     type=[
         "jpg",
@@ -1784,42 +1643,42 @@ custom_headline = st.text_input(
 
 
 # =========================================================
-# UPLOADED PREVIEW
+# PREVIEW
 # =========================================================
 
-if uploaded_files:
+if uploaded:
 
     st.subheader(
         "Uploaded Images"
     )
 
 
-    columns = st.columns(
+    cols = st.columns(
         min(
-            len(uploaded_files),
+            len(uploaded),
             4
         )
     )
 
 
     for index, file in enumerate(
-        uploaded_files
+        uploaded
     ):
 
-        source = Image.open(
+        image = Image.open(
             io.BytesIO(
                 file.getvalue()
             )
         )
 
 
-        with columns[
+        with cols[
             index
-            % len(columns)
+            % len(cols)
         ]:
 
             st.image(
-                source,
+                image,
                 caption=(
                     f"Slide {index + 1}"
                 ),
@@ -1828,7 +1687,7 @@ if uploaded_files:
 
 
     # =====================================================
-    # GENERATE
+    # GENERATE AI
     # =====================================================
 
     if st.button(
@@ -1836,103 +1695,127 @@ if uploaded_files:
         type="primary"
     ):
 
-        with st.spinner(
-            "Cloud AI is analyzing the first image..."
-        ):
+        try:
 
-            try:
+            first_bytes = (
+                uploaded[
+                    0
+                ].getvalue()
+            )
 
-                first_bytes = (
-                    uploaded_files[
-                        0
-                    ].getvalue()
+
+            # STAGE 1
+
+            with st.spinner(
+                "Step 1 of 2: AI is looking at the image..."
+            ):
+
+                description = (
+                    analyze_image(
+                        first_bytes
+                    )
                 )
 
 
-                ai_response = (
-                    ask_cloudflare(
-                        first_bytes,
+            st.session_state[
+                "vision_description"
+            ] = description
+
+
+            st.session_state[
+                "vision_raw"
+            ] = description
+
+
+            # STAGE 2
+
+            with st.spinner(
+                "Step 2 of 2: AI is writing the Instagram post..."
+            ):
+
+                writer_response = (
+                    generate_instagram_copy(
+                        description,
                         custom_headline
                     )
                 )
 
 
-                (
-                    headline,
-                    suggested,
-                    paragraph_1,
-                    paragraph_2,
-                    hashtags
-                ) = parse_ai_response(
-                    ai_response
+            st.session_state[
+                "writer_raw"
+            ] = writer_response
+
+
+            (
+                headline,
+                highlight,
+                p1,
+                p2,
+                hashtags
+            ) = parse_copy(
+                writer_response
+            )
+
+
+            if custom_headline.strip():
+
+                headline = (
+                    custom_headline.strip()
                 )
 
 
-                if custom_headline.strip():
-
-                    headline = (
-                        custom_headline
-                        .strip()
-                    )
-
-
-                if not headline:
-
-                    headline = (
-                        "UNTITLED STORY"
-                    )
+            caption = build_caption(
+                p1,
+                p2,
+                hashtags,
+                headline
+            )
 
 
-                final_caption = (
-                    build_final_caption(
-                        paragraph_1,
-                        paragraph_2,
-                        hashtags,
-                        headline
-                    )
+            suggested = [
+                clean_word(
+                    word
                 )
+                for word
+                in highlight.split()
+            ]
 
 
-                st.session_state[
-                    "headline"
-                ] = headline
+            st.session_state[
+                "headline"
+            ] = headline
 
 
-                st.session_state[
-                    "suggested_highlight"
-                ] = suggested
+            st.session_state[
+                "suggested"
+            ] = suggested
 
 
-                st.session_state[
-                    "caption"
-                ] = final_caption
+            st.session_state[
+                "caption"
+            ] = caption
 
 
-                st.session_state[
-                    "ai_response"
-                ] = ai_response
+            st.session_state[
+                "ready"
+            ] = True
 
 
-                st.session_state[
-                    "ai_ready"
-                ] = True
+            st.session_state[
+                "slides"
+            ] = []
 
 
-                st.session_state[
-                    "rendered_slides"
-                ] = []
+            st.success(
+                "AI successfully analyzed the image and created the post."
+            )
 
 
-                st.success(
-                    "AI text generated!"
-                )
+        except Exception as error:
 
-
-            except Exception as error:
-
-                st.error(
-                    str(error)
-                )
+            st.error(
+                str(error)
+            )
 
 
 # =========================================================
@@ -1940,9 +1823,9 @@ if uploaded_files:
 # =========================================================
 
 if (
-    uploaded_files
+    uploaded
     and st.session_state[
-        "ai_ready"
+        "ready"
     ]
 ):
 
@@ -1953,75 +1836,80 @@ if (
     )
 
 
-    edited_headline = st.text_input(
-        "Headline",
-        value=(
-            st.session_state[
-                "headline"
-            ]
-        ),
-        key="edited_headline"
-    )
-
-
-    word_options = (
-        get_headline_word_options(
-            edited_headline
+    edited_headline = (
+        st.text_input(
+            "Headline",
+            value=(
+                st.session_state[
+                    "headline"
+                ]
+            ),
+            key=(
+                "edited_headline"
+            )
         )
     )
 
 
-    suggested_words = {
-
-        clean_word(word)
-
-        for word in
-        st.session_state[
-            "suggested_highlight"
-        ]
-    }
+    options = headline_words(
+        edited_headline
+    )
 
 
-    default_highlights = [
+    defaults_blue = [
 
         word
 
-        for word in word_options
+        for word in options
 
-        if word in suggested_words
+        if word in (
+            st.session_state[
+                "suggested"
+            ]
+        )
     ]
 
 
-    selected_highlights = (
+    selected_blue = (
         st.multiselect(
             "Choose words to make BLUE",
-            options=word_options,
-            default=default_highlights
+            options=options,
+            default=defaults_blue
         )
     )
 
-
-    st.caption(
-        "You decide which words become blue."
-    )
-
-
-    # CAPTION
 
     st.subheader(
         "Instagram Caption"
     )
 
 
-    edited_caption = st.text_area(
-        "Edit caption if needed",
-        value=(
-            st.session_state[
-                "caption"
-            ]
-        ),
-        height=450
+    edited_caption = (
+        st.text_area(
+            "Edit caption if needed",
+            value=(
+                st.session_state[
+                    "caption"
+                ]
+            ),
+            height=450
+        )
     )
+
+
+    # =====================================================
+    # SHOW VISION DESCRIPTION
+    # =====================================================
+
+    with st.expander(
+        "What the Vision AI saw"
+    ):
+
+        st.write(
+            st.session_state[
+                "vision_description"
+            ]
+        )
 
 
     # =====================================================
@@ -2033,176 +1921,166 @@ if (
         type="primary"
     ):
 
-        try:
+        first = Image.open(
+            io.BytesIO(
+                uploaded[
+                    0
+                ].getvalue()
+            )
+        )
 
-            first_image = Image.open(
+
+        slides = []
+
+
+        cover = create_cover(
+            first,
+            edited_headline,
+            selected_blue
+        )
+
+
+        slides.append(
+            to_png(
+                cover
+            )
+        )
+
+
+        for file in (
+            uploaded[1:]
+        ):
+
+            image = Image.open(
                 io.BytesIO(
-                    uploaded_files[
-                        0
-                    ].getvalue()
+                    file.getvalue()
                 )
             )
 
 
-            generated_slides = []
-
-
-            cover = create_cover(
-                first_image,
-                edited_headline,
-                selected_highlights
-            )
-
-
-            generated_slides.append(
-                image_to_png_bytes(
-                    cover
+            slide = (
+                make_full_slide(
+                    image
                 )
             )
 
 
-            for file in (
-                uploaded_files[1:]
-            ):
-
-                source = Image.open(
-                    io.BytesIO(
-                        file.getvalue()
-                    )
+            slides.append(
+                to_png(
+                    slide
                 )
+            )
 
 
-                slide = (
-                    make_full_slide(
-                        source
-                    )
-                )
+        st.session_state[
+            "slides"
+        ] = slides
 
 
-                generated_slides.append(
-                    image_to_png_bytes(
-                        slide
-                    )
-                )
+        st.session_state[
+            "caption"
+        ] = edited_caption
 
 
-            st.session_state[
-                "rendered_slides"
-            ] = generated_slides
+        st.success(
+            "Carousel generated!"
+        )
 
 
+# =========================================================
+# DOWNLOAD
+# =========================================================
+
+if (
+    uploaded
+    and st.session_state[
+        "slides"
+    ]
+):
+
+    st.header(
+        "Preview & Download"
+    )
+
+
+    for index, data in enumerate(
+        st.session_state[
+            "slides"
+        ],
+        start=1
+    ):
+
+        st.markdown(
+            f"## Slide {index}"
+        )
+
+
+        st.image(
+            data,
+            width=650
+        )
+
+
+        st.download_button(
+            label=(
+                f"Download Slide "
+                f"{index} PNG"
+            ),
+            data=data,
+            file_name=(
+                f"slide_"
+                f"{index:02d}.png"
+            ),
+            mime="image/png",
+            key=(
+                f"download_"
+                f"{index}"
+            ),
+            on_click="ignore"
+        )
+
+
+        st.divider()
+
+
+    st.subheader(
+        "Final Caption"
+    )
+
+
+    st.text_area(
+        "Copy this caption",
+        value=(
             st.session_state[
                 "caption"
-            ] = edited_caption
-
-
-            st.success(
-                "High quality carousel generated!"
-            )
-
-
-        except Exception as error:
-
-            st.error(
-                str(error)
-            )
-
-
-    # =====================================================
-    # RESULTS
-    # =====================================================
-
-    if st.session_state[
-        "rendered_slides"
-    ]:
-
-        st.header(
-            "Preview & Download"
-        )
-
-
-        st.caption(
-            "Downloaded files are full 2160 × 2880 PNG masters."
-        )
-
-
-        for index, png_data in enumerate(
-            st.session_state[
-                "rendered_slides"
-            ],
-            start=1
-        ):
-
-            st.markdown(
-                f"## Slide {index}"
-            )
-
-
-            st.image(
-                png_data,
-                width=650
-            )
-
-
-            st.download_button(
-                label=(
-                    f"Download Slide "
-                    f"{index} PNG"
-                ),
-                data=png_data,
-                file_name=(
-                    f"slide_"
-                    f"{index:02d}.png"
-                ),
-                mime="image/png",
-                key=(
-                    f"download_"
-                    f"{index}"
-                ),
-                on_click="ignore"
-            )
-
-
-            st.divider()
-
-
-        st.subheader(
-            "Final Caption"
-        )
-
-
-        st.text_area(
-            "Copy this caption",
-            value=(
-                st.session_state[
-                    "caption"
-                ]
-            ),
-            height=450,
-            key="final_caption"
-        )
-
-
-        with st.expander(
-            "Raw AI Response"
-        ):
-
-            raw = st.session_state[
-                "ai_response"
             ]
+        ),
+        height=450,
+        key="final_caption"
+    )
 
 
-            if isinstance(
-                raw,
-                (dict, list)
-            ):
+    with st.expander(
+        "Debug AI Responses"
+    ):
 
-                st.json(
-                    raw
-                )
+        st.markdown(
+            "### Vision AI"
+        )
 
-            else:
+        st.code(
+            st.session_state[
+                "vision_raw"
+            ]
+        )
 
-                st.code(
-                    str(raw)
-                )
+
+        st.markdown(
+            "### Writing AI"
+        )
+
+        st.code(
+            st.session_state[
+                "writer_raw"
+            ]
+        )
